@@ -55,8 +55,6 @@ _KEYWORDS = {
     "academias": ("academia", "fitness", "gym", "crossfit"),
 }
 
-# Categorias confirmadas/documentadas no Geoapify para os primeiros segmentos.
-# Segmentos ainda sem mapeamento continuam usando as fontes OSM de fallback.
 _GEOAPIFY_CATEGORIES = {
     "academia": "sport.fitness",
     "academias": "sport.fitness",
@@ -107,7 +105,7 @@ def _request_json(url: str, *, data: bytes | None = None, timeout: int = 25) -> 
         url,
         data=data,
         headers={
-            "User-Agent": "EVO-Sales/1.0 local-prospecting-agent",
+            "User-Agent": "EVO-Sales/1.1 local-prospecting-agent",
             "Accept": "application/json",
         },
     )
@@ -127,14 +125,7 @@ def _nominatim(params: dict, timeout: int = 18) -> object:
 
 
 def _geocode_city(city: str) -> tuple[float, float, float, float] | None:
-    result = _nominatim(
-        {
-            "q": f"{city}, Brasil",
-            "format": "jsonv2",
-            "limit": 1,
-            "countrycodes": "br",
-        }
-    )
+    result = _nominatim({"q": f"{city}, Brasil", "format": "jsonv2", "limit": 1, "countrycodes": "br"})
     if not isinstance(result, list) or not result or len(result[0].get("boundingbox") or []) != 4:
         return None
     south, north, west, east = map(float, result[0]["boundingbox"])
@@ -160,29 +151,55 @@ def _relevant(item: dict, segment: str) -> bool:
     for key, value in _SEGMENT_TAGS.get(_normalize(segment), []):
         if tags.get(key) == value and (key, value) != ("leisure", "sports_centre"):
             return True
-    text = _normalize(
-        " ".join(
-            str(tags.get(k, ""))
-            for k in ("name", "description", "brand", "operator", "sport", "category", "type", "categories")
-        )
-    )
+    text = _normalize(" ".join(str(tags.get(k, "")) for k in ("name", "description", "brand", "operator", "sport", "category", "type")))
     return any(word in text for word in _KEYWORDS.get(_normalize(segment), (_normalize(segment),)))
 
 
-def _geoapify_contact(properties: dict) -> str:
+def _geoapify_raw(properties: dict) -> dict:
     datasource = properties.get("datasource") or {}
-    raw = datasource.get("raw") or {} if isinstance(datasource, dict) else {}
+    if not isinstance(datasource, dict):
+        return {}
+    raw = datasource.get("raw") or {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _geoapify_relevant(properties: dict, segment: str) -> bool:
+    """Validate the actual business evidence, not merely the requested API category."""
+    raw = _geoapify_raw(properties)
+    normalized_segment = _normalize(segment)
+
+    # Strong evidence from the source tags.
+    for key, value in _SEGMENT_TAGS.get(normalized_segment, []):
+        if (key, value) == ("leisure", "sports_centre"):
+            continue
+        if _normalize(raw.get(key, "")) == _normalize(value):
+            return True
+
+    # Secondary evidence from business name/brand/operator/description.
+    text = _normalize(
+        " ".join(
+            str(value or "")
+            for value in (
+                properties.get("name"),
+                properties.get("description"),
+                properties.get("brand"),
+                properties.get("operator"),
+                raw.get("name"),
+                raw.get("brand"),
+                raw.get("operator"),
+                raw.get("description"),
+            )
+        )
+    )
+    return any(word in text for word in _KEYWORDS.get(normalized_segment, (normalized_segment,)))
+
+
+def _geoapify_contact(properties: dict) -> str:
+    raw = _geoapify_raw(properties)
     candidates = (
-        properties.get("phone"),
-        properties.get("website"),
-        properties.get("email"),
-        raw.get("contact:whatsapp") if isinstance(raw, dict) else None,
-        raw.get("contact:phone") if isinstance(raw, dict) else None,
-        raw.get("phone") if isinstance(raw, dict) else None,
-        raw.get("contact:website") if isinstance(raw, dict) else None,
-        raw.get("website") if isinstance(raw, dict) else None,
-        raw.get("contact:email") if isinstance(raw, dict) else None,
-        raw.get("email") if isinstance(raw, dict) else None,
+        properties.get("phone"), properties.get("website"), properties.get("email"),
+        raw.get("contact:whatsapp"), raw.get("contact:phone"), raw.get("phone"),
+        raw.get("contact:website"), raw.get("website"), raw.get("contact:email"), raw.get("email"),
     )
     for value in candidates:
         if value:
@@ -201,15 +218,13 @@ def _query_geoapify(segment: str, bbox: tuple[float, float, float, float], limit
         return []
 
     south, west, north, east = bbox
-    params = urllib.parse.urlencode(
-        {
-            "categories": category,
-            "filter": f"rect:{west},{north},{east},{south}",
-            "limit": max(1, min(limit * 3, 30)),
-            "lang": "pt",
-            "apiKey": api_key,
-        }
-    )
+    params = urllib.parse.urlencode({
+        "categories": category,
+        "filter": f"rect:{west},{north},{east},{south}",
+        "limit": max(1, min(limit * 5, 40)),
+        "lang": "pt",
+        "apiKey": api_key,
+    })
     url = f"https://api.geoapify.com/v2/places?{params}"
     _event("Motor comercial", f"Consultando Geoapify Places para categoria {category}...")
     try:
@@ -228,27 +243,38 @@ def _query_geoapify(segment: str, bbox: tuple[float, float, float, float], limit
         if not name or key in seen:
             continue
         seen.add(key)
-        categories = properties.get("categories") or []
+
+        if not _geoapify_relevant(properties, segment):
+            with _lock:
+                _state["rejected"] += 1
+            _event("Candidato descartado", f"{name}: a categoria da fonte não foi confirmada pelos dados do estabelecimento.")
+            continue
+
+        raw = _geoapify_raw(properties)
         tags = {
             "name": name,
-            "categories": " ".join(categories) if isinstance(categories, list) else str(categories),
-            "category": category,
+            "description": properties.get("description") or raw.get("description") or "",
+            "brand": properties.get("brand") or raw.get("brand") or "",
+            "operator": properties.get("operator") or raw.get("operator") or "",
             "address": properties.get("formatted") or properties.get("address_line2") or "",
             "phone": _geoapify_contact(properties),
+            "leisure": raw.get("leisure") or "",
+            "sport": raw.get("sport") or "",
+            "amenity": raw.get("amenity") or "",
+            "shop": raw.get("shop") or "",
+            "tourism": raw.get("tourism") or "",
         }
-        candidate = {"tags": tags, "provider": "Geoapify Places"}
-        if _relevant(candidate, segment):
-            results.append(candidate)
-            _event("Empresa encontrada", f"{name} encontrada pelo Geoapify. Validando dados...")
+        results.append({"tags": tags, "provider": "Geoapify Places"})
+        _event("Empresa validada", f"{name} foi confirmada como '{segment}' pelo Geoapify.")
         if len(results) >= limit:
             break
 
     if results:
         with _lock:
             _state["provider"] = "Geoapify Places"
-        _event("Motor comercial ativo", f"Geoapify retornou {len(results)} empresa(s) compatível(is).")
+        _event("Motor comercial ativo", f"Geoapify retornou {len(results)} empresa(s) validada(s).")
     else:
-        _event("Geoapify sem resultado", "Nenhuma empresa compatível foi retornada nessa área. Usando fallback.")
+        _event("Geoapify sem lead válido", "A fonte respondeu, mas nenhum estabelecimento passou na validação semântica. Usando fallback.")
     return results
 
 
@@ -276,18 +302,10 @@ def _bounded_nominatim(segment: str, bbox: tuple[float, float, float, float], li
     _event("Busca POI fallback", "Consultando pontos comerciais gratuitos dentro da cidade...")
     for phrase in _NOMINATIM_SPECIAL.get(_normalize(segment), (_normalize(segment),)):
         try:
-            response = _nominatim(
-                {
-                    "q": f"[{phrase}]",
-                    "format": "jsonv2",
-                    "limit": min(limit, 10),
-                    "countrycodes": "br",
-                    "viewbox": viewbox,
-                    "bounded": 1,
-                    "extratags": 1,
-                    "addressdetails": 1,
-                }
-            )
+            response = _nominatim({
+                "q": f"[{phrase}]", "format": "jsonv2", "limit": min(limit, 10), "countrycodes": "br",
+                "viewbox": viewbox, "bounded": 1, "extratags": 1, "addressdetails": 1,
+            })
         except Exception:
             continue
         if not isinstance(response, list):
@@ -317,7 +335,6 @@ def _search(segment: str, city: str, limit: int) -> list[dict]:
     accepted: list[dict] = []
     seen: set[str] = set()
 
-    # 1) Fonte principal: Geoapify Places, quando a chave estiver configurada.
     for candidate in _query_geoapify(segment, bbox, limit):
         name = _normalize((candidate.get("tags") or {}).get("name", ""))
         if name and name not in seen:
@@ -326,7 +343,6 @@ def _search(segment: str, city: str, limit: int) -> list[dict]:
         if len(accepted) >= limit:
             return accepted
 
-    # 2) Fallback gratuito: Overpass.
     result = _query_overpass(_build_query(segment, bbox))
     elements = result.get("elements", []) if isinstance(result, dict) else []
     for item in elements:
@@ -346,7 +362,6 @@ def _search(segment: str, city: str, limit: int) -> list[dict]:
         if len(accepted) >= limit:
             return accepted
 
-    # 3) Último fallback: Nominatim limitado à cidade.
     if len(accepted) < limit:
         for candidate in _bounded_nominatim(segment, bbox, limit - len(accepted)):
             key = _normalize((candidate.get("tags") or {}).get("name", ""))
@@ -360,15 +375,8 @@ def _search(segment: str, city: str, limit: int) -> list[dict]:
 
 def _contact(tags: dict) -> str:
     for key in (
-        "contact:whatsapp",
-        "whatsapp",
-        "contact:phone",
-        "phone",
-        "contact:email",
-        "email",
-        "contact:website",
-        "website",
-        "url",
+        "contact:whatsapp", "whatsapp", "contact:phone", "phone", "contact:email", "email",
+        "contact:website", "website", "url",
     ):
         if tags.get(key):
             return str(tags[key]).strip()[:120]
@@ -377,13 +385,10 @@ def _contact(tags: dict) -> str:
 
 def _exists(name: str, city: str) -> bool:
     with get_connection() as conn:
-        return (
-            conn.execute(
-                "SELECT 1 FROM leads WHERE lower(company_name)=lower(?) AND lower(city)=lower(?) LIMIT 1",
-                (name.strip(), city.strip()),
-            ).fetchone()
-            is not None
-        )
+        return conn.execute(
+            "SELECT 1 FROM leads WHERE lower(company_name)=lower(?) AND lower(city)=lower(?) LIMIT 1",
+            (name.strip(), city.strip()),
+        ).fetchone() is not None
 
 
 def run_mission(segment: str, city: str, limit: int = 5) -> None:
@@ -408,19 +413,8 @@ def run_mission(segment: str, city: str, limit: int = 5) -> None:
                 continue
             contact = _contact(tags)
             provider = str(place.get("provider") or _state.get("provider") or "EVO discovery")
-            _event(
-                "Lead validado",
-                f"{name}: segmento confirmado" + (" e contato público encontrado." if contact else "; contato público ainda não disponível."),
-            )
-            saved = create_lead(
-                LeadCreate(
-                    company_name=name,
-                    segment=segment,
-                    city=city,
-                    contact=contact,
-                    source=provider,
-                )
-            )
+            _event("Lead validado", f"{name}: segmento confirmado" + (" e contato público encontrado." if contact else "; contato público ainda não disponível."))
+            saved = create_lead(LeadCreate(company_name=name, segment=segment, city=city, contact=contact, source=provider))
             with _lock:
                 _state["saved"] += 1
             _event("Oportunidade adicionada", f"{name}: score {saved['score']}/100, status {saved['status']}.")
