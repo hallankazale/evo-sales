@@ -16,19 +16,13 @@
       </div>
       <div class="status-card">
         <span class="status-dot"></span>
-        <div>
-          <strong id="employee-status">Online</strong>
-          <small id="employee-activity">Aguardando tarefa</small>
-        </div>
+        <div><strong id="employee-status">Online</strong><small id="employee-activity">Aguardando missão</small></div>
       </div>
     </aside>
 
     <section class="content">
       <header class="topbar">
-        <div>
-          <p class="eyebrow">Central de operação</p>
-          <h2>Visão geral</h2>
-        </div>
+        <div><p class="eyebrow">Central de operação</p><h2>Visão geral</h2></div>
         <button id="refresh-button">Atualizar</button>
       </header>
 
@@ -41,43 +35,26 @@
 
       <section class="grid">
         <article class="panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Novo lead</p>
-              <h3>Adicionar oportunidade</h3>
-            </div>
-          </div>
-          <form id="lead-form">
-            <label>Empresa<input name="company_name" required minlength="2" placeholder="Ex.: Academia Vitta" /></label>
-            <label>Segmento<input name="segment" placeholder="Ex.: academia" /></label>
-            <label>Cidade<input name="city" placeholder="Ex.: Campo Verde" /></label>
-            <label>Contato<input name="contact" placeholder="WhatsApp, e-mail ou site" /></label>
-            <label>Origem<input name="source" value="manual" /></label>
-            <button type="submit">Analisar lead</button>
-            <p id="form-feedback" class="feedback" role="status"></p>
+          <div class="panel-heading"><div><p class="eyebrow">Missão autônoma</p><h3>Mandar EVO-01 procurar clientes</h3></div></div>
+          <form id="mission-form">
+            <label>Segmento<input name="segment" required minlength="2" placeholder="Ex.: academia" /></label>
+            <label>Cidade<input name="city" required minlength="2" placeholder="Ex.: Campo Verde, MT" /></label>
+            <label>Quantidade<input name="limit" type="number" min="1" max="10" value="5" /></label>
+            <button id="mission-button" type="submit">Iniciar missão</button>
+            <p id="mission-feedback" class="feedback" role="status">A pesquisa usa dados públicos e não envia mensagens automaticamente.</p>
           </form>
         </article>
 
         <article class="panel activity-panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Atividade</p>
-              <h3>O que a IA está fazendo</h3>
-            </div>
-          </div>
+          <div class="panel-heading"><div><p class="eyebrow">Atividade ao vivo</p><h3>O que a IA está fazendo</h3></div></div>
           <div class="activity-log" id="activity-log">
-            <div class="activity-item"><span></span><p><strong>EVO-01 iniciado.</strong><br />Painel pronto para receber oportunidades.</p></div>
+            <div class="activity-item"><span></span><p><strong>EVO-01 pronto.</strong><br />Defina segmento e cidade para iniciar uma missão.</p></div>
           </div>
         </article>
       </section>
 
       <section class="panel leads-panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">Pipeline</p>
-            <h3>Oportunidades recentes</h3>
-          </div>
-        </div>
+        <div class="panel-heading"><div><p class="eyebrow">Pipeline</p><h3>Oportunidades encontradas</h3></div></div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Empresa</th><th>Segmento</th><th>Cidade</th><th>Score</th><th>Status</th><th>Abordagem</th></tr></thead>
