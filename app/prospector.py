@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import unicodedata
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -18,6 +19,27 @@ _state = {
     "found": 0,
     "saved": 0,
     "events": [],
+}
+
+# Mapeia termos comuns em português para tags do OpenStreetMap.
+_SEGMENT_TAGS = {
+    "academia": [("leisure", "fitness_centre"), ("leisure", "sports_centre"), ("sport", "fitness")],
+    "academias": [("leisure", "fitness_centre"), ("leisure", "sports_centre"), ("sport", "fitness")],
+    "barbearia": [("shop", "hairdresser")],
+    "salao": [("shop", "hairdresser"), ("shop", "beauty")],
+    "salao de beleza": [("shop", "beauty"), ("shop", "hairdresser")],
+    "restaurante": [("amenity", "restaurant")],
+    "lanchonete": [("amenity", "fast_food")],
+    "pizzaria": [("amenity", "restaurant")],
+    "clinica": [("amenity", "clinic"), ("healthcare", "clinic")],
+    "dentista": [("amenity", "dentist")],
+    "mercado": [("shop", "supermarket"), ("shop", "convenience")],
+    "supermercado": [("shop", "supermarket")],
+    "oficina": [("shop", "car_repair")],
+    "imobiliaria": [("office", "estate_agent")],
+    "farmacia": [("amenity", "pharmacy")],
+    "pet shop": [("shop", "pet")],
+    "hotel": [("tourism", "hotel")],
 }
 
 
@@ -44,44 +66,93 @@ def get_state() -> dict:
         }
 
 
-def _search_nominatim(segment: str, city: str, limit: int) -> list[dict]:
-    queries = [
-        f"{segment}, {city}, Brasil",
-        f"{segment} {city} Brasil",
-    ]
-    for query in queries:
-        params = urllib.parse.urlencode({
-            "q": query,
-            "format": "jsonv2",
-            "addressdetails": 1,
-            "extratags": 1,
-            "namedetails": 1,
-            "limit": max(1, min(limit, 10)),
-            "countrycodes": "br",
-        })
-        request = urllib.request.Request(
-            f"https://nominatim.openstreetmap.org/search?{params}",
-            headers={"User-Agent": "EVO-Sales/0.3 local-prospecting-demo"},
-        )
-        with urllib.request.urlopen(request, timeout=12) as response:
-            results = json.loads(response.read().decode("utf-8"))
-        if results:
-            return results
-    return []
+def _normalize(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value.strip().lower())
+    return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def _request_json(url: str, *, data: bytes | None = None, timeout: int = 20) -> object:
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "User-Agent": "EVO-Sales/0.4 local-prospecting",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _geocode_city(city: str) -> tuple[float, float, float, float] | None:
+    params = urllib.parse.urlencode({
+        "q": f"{city}, Brasil",
+        "format": "jsonv2",
+        "limit": 1,
+        "countrycodes": "br",
+        "addressdetails": 1,
+    })
+    results = _request_json(f"https://nominatim.openstreetmap.org/search?{params}")
+    if not isinstance(results, list) or not results:
+        return None
+
+    bbox = results[0].get("boundingbox")
+    if not bbox or len(bbox) != 4:
+        return None
+
+    south, north, west, east = map(float, bbox)
+    return south, west, north, east
+
+
+def _build_overpass_query(segment: str, bbox: tuple[float, float, float, float], limit: int) -> str:
+    south, west, north, east = bbox
+    box = f"({south},{west},{north},{east})"
+    tags = _SEGMENT_TAGS.get(_normalize(segment))
+
+    selectors: list[str] = []
+    if tags:
+        for key, value in tags:
+            selectors.extend([
+                f'node["{key}"="{value}"]{box};',
+                f'way["{key}"="{value}"]{box};',
+                f'relation["{key}"="{value}"]{box};',
+            ])
+    else:
+        # Fallback seguro para segmentos ainda não mapeados: procura o termo no nome.
+        escaped = segment.replace('"', '\\"')
+        selectors.extend([
+            f'node["name"~"{escaped}",i]{box};',
+            f'way["name"~"{escaped}",i]{box};',
+            f'relation["name"~"{escaped}",i]{box};',
+        ])
+
+    # O limit é aplicado após a resposta para não criar consultas Overpass inválidas.
+    return "[out:json][timeout:20];(" + "".join(selectors) + ");out center tags;"
+
+
+def _search_overpass(segment: str, city: str, limit: int) -> list[dict]:
+    bbox = _geocode_city(city)
+    if bbox is None:
+        raise ValueError("cidade_nao_localizada")
+
+    _event("Cidade localizada", f"Área de {city} identificada. Buscando estabelecimentos...")
+    query = _build_overpass_query(segment, bbox, limit)
+    payload = urllib.parse.urlencode({"data": query}).encode("utf-8")
+    result = _request_json("https://overpass-api.de/api/interpreter", data=payload, timeout=30)
+    if not isinstance(result, dict):
+        return []
+
+    elements = result.get("elements") or []
+    valid = [item for item in elements if isinstance(item, dict) and (item.get("tags") or {}).get("name")]
+    return valid[:limit]
 
 
 def _extract_company(place: dict) -> str:
-    namedetails = place.get("namedetails") or {}
-    name = namedetails.get("name") or namedetails.get("name:pt")
-    if name:
-        return str(name).strip()
-
-    display_name = str(place.get("display_name", "")).strip()
-    return display_name.split(",")[0].strip() if display_name else ""
+    return str((place.get("tags") or {}).get("name") or "").strip()
 
 
 def _extract_contact(place: dict) -> str:
-    tags = place.get("extratags") or {}
+    tags = place.get("tags") or {}
     for key in (
         "contact:whatsapp",
         "contact:phone",
@@ -97,11 +168,11 @@ def _extract_contact(place: dict) -> str:
     return ""
 
 
-def _already_exists(company_name: str) -> bool:
+def _already_exists(company_name: str, city: str) -> bool:
     with get_connection() as connection:
         row = connection.execute(
-            "SELECT 1 FROM leads WHERE lower(company_name) = lower(?) LIMIT 1",
-            (company_name.strip(),),
+            "SELECT 1 FROM leads WHERE lower(company_name) = lower(?) AND lower(city) = lower(?) LIMIT 1",
+            (company_name.strip(), city.strip()),
         ).fetchone()
     return row is not None
 
@@ -120,20 +191,20 @@ def run_mission(segment: str, city: str, limit: int = 5) -> None:
 
     try:
         _event("Missão iniciada", f"Pesquisando {segment} em {city}...")
-        places = _search_nominatim(segment, city, limit)
+        places = _search_overpass(segment, city, limit)
         with _lock:
             _state["found"] = len(places)
 
         if not places:
             _event(
                 "Pesquisa concluída",
-                "A fonte pública não retornou empresas para essa combinação. Tente o segmento no singular e use cidade + UF.",
+                "A cidade foi localizada, mas o OpenStreetMap não possui estabelecimentos desse segmento cadastrados nessa área.",
             )
             return
 
         for place in places:
             company = _extract_company(place)
-            if not company or _already_exists(company):
+            if not company or _already_exists(company, city):
                 continue
 
             contact = _extract_contact(place)
@@ -145,7 +216,7 @@ def run_mission(segment: str, city: str, limit: int = 5) -> None:
                 segment=segment,
                 city=city,
                 contact=contact,
-                source="OpenStreetMap/Nominatim",
+                source="OpenStreetMap/Overpass",
             )
             saved = create_lead(lead)
             with _lock:
@@ -158,9 +229,11 @@ def run_mission(segment: str, city: str, limit: int = 5) -> None:
         with _lock:
             saved_count = _state["saved"]
         if saved_count == 0:
-            _event("Pesquisa concluída", "Resultados encontrados, mas nenhum novo lead válido foi adicionado.")
+            _event("Pesquisa concluída", "Os resultados encontrados já estavam cadastrados no pipeline.")
         else:
             _event("Missão concluída", f"Pesquisa finalizada. {saved_count} nova(s) oportunidade(s) adicionada(s).")
+    except ValueError:
+        _event("Cidade não localizada", f"Não consegui localizar '{city}'. Use no formato Cidade, UF.")
     except Exception as exc:
         _event("Falha na pesquisa", f"Não foi possível concluir a missão: {type(exc).__name__}.")
     finally:
