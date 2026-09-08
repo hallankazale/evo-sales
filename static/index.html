@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EVO Sales</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <aside class="sidebar">
+      <div>
+        <p class="eyebrow">EVO Sales</p>
+        <h1>Funcionário IA #01</h1>
+        <p class="muted">Prospecção e qualificação de oportunidades.</p>
+      </div>
+      <div class="status-card">
+        <span class="status-dot"></span>
+        <div>
+          <strong id="employee-status">Online</strong>
+          <small id="employee-activity">Aguardando tarefa</small>
+        </div>
+      </div>
+    </aside>
+
+    <section class="content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Central de operação</p>
+          <h2>Visão geral</h2>
+        </div>
+        <button id="refresh-button">Atualizar</button>
+      </header>
+
+      <section class="metrics" aria-label="Métricas">
+        <article><span>Leads</span><strong id="metric-leads">0</strong></article>
+        <article><span>Qualificados</span><strong id="metric-qualified">0</strong></article>
+        <article><span>Mensagens prontas</span><strong id="metric-messages">0</strong></article>
+        <article><span>Clientes</span><strong id="metric-clients">0</strong></article>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Novo lead</p>
+              <h3>Adicionar oportunidade</h3>
+            </div>
+          </div>
+          <form id="lead-form">
+            <label>Empresa<input name="company_name" required minlength="2" placeholder="Ex.: Academia Vitta" /></label>
+            <label>Segmento<input name="segment" placeholder="Ex.: academia" /></label>
+            <label>Cidade<input name="city" placeholder="Ex.: Campo Verde" /></label>
+            <label>Contato<input name="contact" placeholder="WhatsApp, e-mail ou site" /></label>
+            <label>Origem<input name="source" value="manual" /></label>
+            <button type="submit">Analisar lead</button>
+            <p id="form-feedback" class="feedback" role="status"></p>
+          </form>
+        </article>
+
+        <article class="panel activity-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Atividade</p>
+              <h3>O que a IA está fazendo</h3>
+            </div>
+          </div>
+          <div class="activity-log" id="activity-log">
+            <div class="activity-item"><span></span><p><strong>EVO-01 iniciado.</strong><br />Painel pronto para receber oportunidades.</p></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel leads-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Pipeline</p>
+            <h3>Oportunidades recentes</h3>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Empresa</th><th>Segmento</th><th>Cidade</th><th>Score</th><th>Status</th><th>Abordagem</th></tr></thead>
+            <tbody id="leads-body"><tr><td colspan="6" class="empty">Nenhum lead ainda.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
