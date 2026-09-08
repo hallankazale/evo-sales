@@ -5,7 +5,6 @@ import threading
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from html.parser import HTMLParser
 
 from app.database import get_connection
 from app.schemas import LeadCreate
@@ -45,27 +44,57 @@ def get_state() -> dict:
         }
 
 
-class _OSMParser(HTMLParser):
-    pass
-
-
 def _search_nominatim(segment: str, city: str, limit: int) -> list[dict]:
-    # Nominatim is used conservatively: one user-triggered request, small result set,
-    # descriptive User-Agent and no scraping loop. It returns public OSM place data.
-    query = f"{segment} em {city}, Brasil"
-    params = urllib.parse.urlencode({
-        "q": query,
-        "format": "jsonv2",
-        "addressdetails": 1,
-        "limit": max(1, min(limit, 10)),
-        "countrycodes": "br",
-    })
-    request = urllib.request.Request(
-        f"https://nominatim.openstreetmap.org/search?{params}",
-        headers={"User-Agent": "EVO-Sales/0.2 local-prospecting-demo"},
-    )
-    with urllib.request.urlopen(request, timeout=12) as response:
-        return json.loads(response.read().decode("utf-8"))
+    queries = [
+        f"{segment}, {city}, Brasil",
+        f"{segment} {city} Brasil",
+    ]
+    for query in queries:
+        params = urllib.parse.urlencode({
+            "q": query,
+            "format": "jsonv2",
+            "addressdetails": 1,
+            "extratags": 1,
+            "namedetails": 1,
+            "limit": max(1, min(limit, 10)),
+            "countrycodes": "br",
+        })
+        request = urllib.request.Request(
+            f"https://nominatim.openstreetmap.org/search?{params}",
+            headers={"User-Agent": "EVO-Sales/0.3 local-prospecting-demo"},
+        )
+        with urllib.request.urlopen(request, timeout=12) as response:
+            results = json.loads(response.read().decode("utf-8"))
+        if results:
+            return results
+    return []
+
+
+def _extract_company(place: dict) -> str:
+    namedetails = place.get("namedetails") or {}
+    name = namedetails.get("name") or namedetails.get("name:pt")
+    if name:
+        return str(name).strip()
+
+    display_name = str(place.get("display_name", "")).strip()
+    return display_name.split(",")[0].strip() if display_name else ""
+
+
+def _extract_contact(place: dict) -> str:
+    tags = place.get("extratags") or {}
+    for key in (
+        "contact:whatsapp",
+        "contact:phone",
+        "phone",
+        "contact:email",
+        "email",
+        "contact:website",
+        "website",
+    ):
+        value = tags.get(key)
+        if value:
+            return str(value).strip()[:120]
+    return ""
 
 
 def _already_exists(company_name: str) -> bool:
@@ -96,28 +125,26 @@ def run_mission(segment: str, city: str, limit: int = 5) -> None:
             _state["found"] = len(places)
 
         if not places:
-            _event("Pesquisa concluída", "Nenhuma oportunidade pública encontrada nessa busca.")
+            _event(
+                "Pesquisa concluída",
+                "A fonte pública não retornou empresas para essa combinação. Tente o segmento no singular e use cidade + UF.",
+            )
             return
 
         for place in places:
-            display_name = str(place.get("display_name", "")).strip()
-            address = place.get("address") or {}
-            company = (
-                address.get("amenity")
-                or address.get("shop")
-                or address.get("office")
-                or display_name.split(",")[0]
-            )
-            company = str(company).strip()
+            company = _extract_company(place)
             if not company or _already_exists(company):
                 continue
 
-            _event("Empresa encontrada", f"Analisando {company}...")
+            contact = _extract_contact(place)
+            detail = "contato público localizado" if contact else "sem contato público cadastrado"
+            _event("Empresa encontrada", f"Analisando {company} — {detail}...")
+
             lead = LeadCreate(
                 company_name=company,
                 segment=segment,
                 city=city,
-                contact="",
+                contact=contact,
                 source="OpenStreetMap/Nominatim",
             )
             saved = create_lead(lead)
@@ -128,7 +155,12 @@ def run_mission(segment: str, city: str, limit: int = 5) -> None:
                 f"{company}: score {saved['score']}/100. Abordagem preparada para aprovação.",
             )
 
-        _event("Missão concluída", f"Pesquisa finalizada. {_state['saved']} nova(s) oportunidade(s) adicionada(s).")
+        with _lock:
+            saved_count = _state["saved"]
+        if saved_count == 0:
+            _event("Pesquisa concluída", "Resultados encontrados, mas nenhum novo lead válido foi adicionado.")
+        else:
+            _event("Missão concluída", f"Pesquisa finalizada. {saved_count} nova(s) oportunidade(s) adicionada(s).")
     except Exception as exc:
         _event("Falha na pesquisa", f"Não foi possível concluir a missão: {type(exc).__name__}.")
     finally:
